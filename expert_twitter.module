@@ -1,0 +1,216 @@
+<?php
+/**
+ * @file
+ * Batch of hooks for pull and display experts tweets.
+ */
+
+/**
+ * Implements hook_node_insert().
+ */
+function expert_twitter_node_insert($node) {
+  // Add expert twitter account.
+  if ($node->type == 'expert' && $twitter = field_get_items('node', $node, 'field_twitter_handle')) {
+    _expert_twitter_add_account($twitter[0]['value'], $node->nid);
+  }
+}
+
+/**
+ * Implements hook_node_delete().
+ */
+function expert_twitter_node_delete($node) {
+  // Delete expert twitter account.
+  if ($node->type == 'expert' && $twitter = field_get_items('node', $node, 'field_twitter_handle')) {
+    _expert_twitter_delete_account($twitter[0]['value'], $node->nid);
+  }
+}
+
+/**
+ * Implements hook_node_update().
+ */
+function expert_twitter_node_update($node) {
+  // Update expert twitter account.
+  if ($node->type == 'expert') {
+    $new_twitter = field_get_items('node', $node, 'field_twitter_handle');
+
+    $old_twitter = field_get_items('node', $node->original, 'field_twitter_handle');
+
+    // Check if twitter name was changed.
+    if ($new_twitter !== $old_twitter) {
+      if ($old_twitter) {
+        // Delete old twitter.
+        _expert_twitter_delete_account($old_twitter[0]['value']);
+      }
+
+      if ($new_twitter) {
+        // Add new twitter.
+        _expert_twitter_add_account($new_twitter[0]['value'], $node->nid);
+      }
+    }
+  }
+}
+
+/**
+ * Helper function for adding twitter account.
+ *
+ * @param string $name
+ *    Twitter account.
+ * @param int $nid
+ *    Expert node nid.
+ */
+function _expert_twitter_add_account($name, $nid) {
+  module_load_include('inc', 'twitter', 'twitter');
+
+  if (twitter_account_load($name)) {
+    watchdog('expert_twitter', 'Twitter name @name already used.', array('@name' => $name), WATCHDOG_NOTICE);
+    return;
+  }
+
+  // Validate twitter account.
+  $twitter = twitter_connect();
+
+  if (!$twitter) {
+    return;
+  }
+
+  $twitter_account = $twitter->users_show($name, FALSE);
+
+  if (!isset($twitter_account->id)) {
+    watchdog('expert_twitter', 'Could not add the Twitter account @name ' .
+      'to expert node nid = @nid.', array(
+      '@name' => $name,
+      '@nid' => $nid
+    ), WATCHDOG_NOTICE);
+  }
+  else {
+    global $user;
+
+    $twitter_account->uid = $user->uid;
+    $twitter_account->import = 1;
+    twitter_account_save($twitter_account, FALSE);
+
+    watchdog('expert_twitter', 'Twitter account @name successfully' .
+      ' added to expert node nid = @nid.', array(
+      '@name' => $name,
+      '@nid' => $nid
+    ), WATCHDOG_INFO);
+  }
+}
+
+/**
+ * Function for deleting twitter account.
+ *
+ * @param string $name
+ *    Twitter account.
+ * @param int $expert_id
+ *    Expert node nid.
+ */
+function _expert_twitter_delete_account($name, $expert_id = NULL) {
+  module_load_include('inc', 'twitter', 'twitter');
+
+  if ($twitter_account = twitter_account_load($name)) {
+    twitter_account_delete($twitter_account->id);
+
+    watchdog('expert_twitter', 'Twitter name @name was deleted.', array('@name' => $name), WATCHDOG_INFO);
+
+    // Delete all tweet nodes.
+    if ($expert_id) {
+      $result = db_select('field_data_field_expert', 'e')
+        ->fields('e', array('entity_id'))
+        ->condition('e.field_expert_target_id', $expert_id, '=')
+        ->execute();
+
+      while ($record = $result->fetchAssoc()) {
+        node_delete($record['entity_id']);
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_twitter_status_save().
+ */
+function expert_twitter_twitter_status_save($status) {
+  // Create new tweet node.
+  $node = new stdClass();
+  $node->type = 'tweet';
+  $node->status = 0;
+
+  // Add message text.
+  $value = $status->text;
+
+  $filter = new stdClass();
+  $filter->settings = array(
+    'filter_url_length' => 496,
+  );
+  $value = _filter_url($value, $filter);
+
+  // Link usernames with their profiles.
+  $value = _twitter_filter_text($value, '@', variable_get('twitter_host', TWITTER_HOST) . '/');
+
+  // Link hashtags.
+  $link_destination = $destination = variable_get('twitter_search', TWITTER_SEARCH) . '/search?q=%23';
+  $value = _twitter_filter_text($value, '#', url($link_destination));
+
+  // Add extra attributes to links.
+  $value = _twitter_filter_link($value, NULL);
+
+  // Avoid XSS within the message.
+  $node->body[LANGUAGE_NONE][0]['value'] = filter_xss($value);
+
+  // Get expert.
+  $expert_twitter = db_select('field_data_field_twitter_handle', 't')
+    ->fields('t', array('entity_id'))
+    ->condition('t.field_twitter_handle_value', '@' . $status->user->screen_name, '=')
+    ->execute()
+    ->fetchField();
+
+  if (!$expert_twitter) {
+    return;
+  }
+
+  $node->field_expert[LANGUAGE_NONE][0]['target_id'] = $expert_twitter;
+  $node->title = $status->user->screen_name . "'s tweet";
+  $node->field_screen_name[LANGUAGE_NONE][0]['value'] = $status->user->screen_name;
+  $node->field_twitter_image[LANGUAGE_NONE][0]['value'] = $status->user->profile_image_url;
+
+  $date = new DateTime($status->created_at);
+  $node->created = $date->getTimestamp();
+
+  $node->uid = 1;
+
+  node_save($node);
+}
+
+
+/**
+ * Implements hook_cron().
+ *
+ * Delete old tweet nodes.
+ */
+function expert_twitter_cron() {
+  // Nuke old statuses.
+  if ($age = variable_get('twitter_expire', 0)) {
+    $result = db_select('node', 'n')
+      ->fields('n', array('nid'))
+      ->condition('n.type', 'tweet', '=')
+      ->condition('n.created', REQUEST_TIME - $age, '<')
+      ->execute();
+
+    while ($record = $result->fetchAssoc()) {
+      node_delete($record['nid']);
+    }
+  }
+}
+
+/**
+ * Implements hook_addthis_markup_alter().
+ */
+function expert_twitter_addthis_markup_alter(&$markup) {
+  if (!empty($markup['#attributes']['addthis:title'])) {
+    $markup['#attributes']['addthis:title'] = str_replace(' - ' . variable_get('site_name'), '', $markup['#attributes']['addthis:title']);
+
+    // In AddThis used htmlentities() that it breaks some titles.
+    // Here htmlspecialchars() is enough.
+    $markup['#attributes']['addthis:title'] = htmlspecialchars(html_entity_decode($markup['#attributes']['addthis:title']));
+  }
+}

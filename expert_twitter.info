@@ -1,0 +1,8 @@
+name = Expert Twitter
+description = Adds possibility to pull experts tweets.
+core = 7.x
+dependencies[] = oauth_common
+dependencies[] = twitter
+dependencies[] = content_type_expert
+
+project = "expert_twitter"

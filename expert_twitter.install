@@ -1,0 +1,23 @@
+<?php
+/**
+ * @file
+ * This file will add authenticated twitter account.
+ */
+
+/**
+ * Implements hook_install().
+ */
+function expert_twitter_install() {
+  db_insert('twitter_account')
+    ->fields(array(
+      'twitter_uid' => 12345678,
+      'screen_name' => 'test_twitter_account',
+      'oauth_token' => 'oauth_token',
+      'oauth_token_secret' => 'oauth_token_secret',
+      'name' => 'test_account',
+      'created_time' => time(),
+      'created_at' => 'Wed Jul 15 09:47:49 +0000 2015',
+      'utc_offset' => 0
+    ))
+    ->execute();
+}
